@@ -8,7 +8,7 @@ import {
     RhinestoneAccount
 } from "modulekit/test/utils/biconomy-base/RhinestoneModuleKit.sol";
 import { SplitInvestorModule } from "../../src/executors/SplitInvestorModule.sol";
-
+import "forge-std/console.sol";
 contract SplitInvestorModuleTest is Test, RhinestoneModuleKit {
     using RhinestoneModuleKitLib for RhinestoneAccount;
 
@@ -29,7 +29,7 @@ contract SplitInvestorModuleTest is Test, RhinestoneModuleKit {
         instance.addExecutor(address(splitInvestorModule));
     }
 
-    function testExecuteAction() public {
+    function testDepositAndInvest() public {
         // Create target and ensure that it doesnt have a balance
         address target = makeAddr("target");
         assertEq(target.balance, 0);
@@ -44,8 +44,8 @@ contract SplitInvestorModuleTest is Test, RhinestoneModuleKit {
 
     function testSetAllocationTooHigh() public {
         SplitInvestorModule.Allocation[] memory allocation = new SplitInvestorModule.Allocation[](2);
-        allocation[0] = SplitInvestorModule.Allocation(btc, 5_000);
-        allocation[1] = SplitInvestorModule.Allocation(steth, 5_100);
+        allocation[0] = SplitInvestorModule.Allocation(btc, 5_000, 0);
+        allocation[1] = SplitInvestorModule.Allocation(steth, 5_100, 0);
         
         vm.expectRevert();
         splitInvestorModule.setAllocation(allocation);
@@ -53,12 +53,16 @@ contract SplitInvestorModuleTest is Test, RhinestoneModuleKit {
 
     function testSetAllocationHappy() public {
         SplitInvestorModule.Allocation[] memory allocation = new SplitInvestorModule.Allocation[](2);
-        allocation[0] = SplitInvestorModule.Allocation(btc, 5_000);
-        allocation[1] = SplitInvestorModule.Allocation(steth, 4_000);
+        allocation[0] = SplitInvestorModule.Allocation(btc, 5_000, 0);
+        allocation[1] = SplitInvestorModule.Allocation(steth, 4_000, 0);
         
         splitInvestorModule.setAllocation(allocation);
         assertEq(splitInvestorModule.allocationEnumeratedLength(), 2);
         assertEq(splitInvestorModule.allocationPercentages(btc), 5_000);
         assertEq(splitInvestorModule.allocationPercentages(steth), 4_000);
+    }
+
+    function testSetCalculateRebalance() public {
+        assertEq(splitInvestorModule.calculateRebalance(), bytes8(abi.encodePacked(bytes1(0x51))));
     }
 }

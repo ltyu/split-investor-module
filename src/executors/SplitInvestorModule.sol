@@ -9,11 +9,16 @@ import { IExecutorManager, ExecutorAction, ModuleExecLib } from "modulekit/modul
 contract SplitInvestorModule is ExecutorBase, FunctionsClient {
     using FunctionsRequest for FunctionsRequest.Request;
     using ModuleExecLib for IExecutorManager;
-    uint32 public constant MAX_CALLBACK_GAS = 70_000;
+
+    uint32 public constant MAX_CALLBACK_GAS = 500_000;
     uint16 public constant MAX_ALLOCATION_PERCENTAGE = 10_000;
 
+    // Deposit Token that will be used to fund account
+    // IERC20 fundingToken;
+
     // A list of token addresses that this wallet wants to invest in
-    address[] public allocationEnumerated;
+    // @dev For now we only handle up to 4 tokens for POC purposes
+    address[] public allocatedTokensList;
 
     // Allocation percentages for each token address 
     // @dev represented with 2 decimal places (10000 = 100%)
@@ -40,12 +45,13 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
     struct Allocation {
         address token;
         uint16 percentage;
+        uint256 notionalValue; // total USD value
     }
 
     constructor(address router) FunctionsClient(router) {}
 
     function allocationEnumeratedLength() public view returns (uint256) {
-        return allocationEnumerated.length;
+        return allocatedTokensList.length;
     }
     /**
      * @notice Sets the allocation %
@@ -60,7 +66,7 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
             totalPercentage += allocation[i].percentage;
         }
 
-        allocationEnumerated = _allocationEnumerated;
+        allocatedTokensList = _allocationEnumerated;
 
         if (totalPercentage > MAX_ALLOCATION_PERCENTAGE)
             revert AllocationPercentageTooHigh();
@@ -120,6 +126,7 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
             revert UnexpectedRequestID(requestId);
         }
         // Save only the first 32 bytes of response/error to always fit within MAX_CALLBACK_GAS
+        // @dev Technically Chainlink Functions can return up to 256 BYTES. For now, we'll keep it at 32.
         lastResponse = bytesToBytes32(response);
         lastResponseLength = uint32(response.length);
         lastError = bytesToBytes32(err);
@@ -128,6 +135,36 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
         _rebalance();
     }
 
+    /**
+     * @notice Calculates the rebalance amounts
+     * returns a byte32, 1 byte for buy/sell and 7 bytes for amount. 7 bytes allows up to 2^56 
+     * 
+     * for example 0x0100000000038ea8000000000040992f000f0a5d01ed64ff0100000000000000
+     *      1 38EA8 means sell 233128 of token at index 0
+     *      0 4233519 means buy 4233519 of token at index 1
+     *      0 F0A5D01ED64FF means sell 4233519231231231 of token at index 2
+     *      1 0000000 means buy 0000000 of token at index 3
+     * 
+     * @dev the intention is to allow this to be called by Chainlink Functions
+     */
+    function calculateRebalance() public returns (bytes32){
+        // Get the stored lastCalculatedNotional for each token
+        uint56 amount1 = 233128;
+        bytes8 results1 = bytes8(abi.encodePacked(bytes1(0x01), bytes7(abi.encodePacked(amount1))));
+
+        uint56 amount2 = 4233519;
+        bytes8 results2 = bytes8(abi.encodePacked(bytes1(0x00), bytes7(abi.encodePacked(amount2))));
+
+        uint56 amount3 = 0;
+        bytes8 results3 = bytes8(abi.encodePacked(bytes1(0x01), bytes7(abi.encodePacked(amount3))));
+
+        uint56 amount4 = 4233519231231231;
+        bytes8 results4 = bytes8(abi.encodePacked(bytes1(0x00), bytes7(abi.encodePacked(amount4))));
+        return bytes32(abi.encodePacked(results1, results2, results4, results3 ));
+        // Calculate the new notional of each allocatedTokensList
+
+        // For each token, store (newCalculatedNotional - lastCalculatedNotional), if result is positive
+    }
     /**
      * @notice Rebalances the tokens based on allocationPercentages. Intends to be called by Chainlink 
      */
