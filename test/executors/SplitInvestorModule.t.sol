@@ -14,6 +14,8 @@ contract SplitInvestorModuleTest is Test, RhinestoneModuleKit {
 
     RhinestoneAccount instance;
     SplitInvestorModule splitInvestorModule;
+    address btc = makeAddr("btc");
+    address steth = makeAddr("steth");
 
     function setUp() public {
         // Setup account
@@ -38,5 +40,25 @@ contract SplitInvestorModuleTest is Test, RhinestoneModuleKit {
 
         // Assert that target has a balance of 1 wei
         assertEq(target.balance, 1 wei);
+    }
+
+    function testSetAllocationTooHigh() public {
+        SplitInvestorModule.Allocation[] memory allocation = new SplitInvestorModule.Allocation[](2);
+        allocation[0] = SplitInvestorModule.Allocation(btc, 5_000);
+        allocation[1] = SplitInvestorModule.Allocation(steth, 5_100);
+        
+        vm.expectRevert();
+        splitInvestorModule.setAllocation(allocation);
+    }
+
+    function testSetAllocationHappy() public {
+        SplitInvestorModule.Allocation[] memory allocation = new SplitInvestorModule.Allocation[](2);
+        allocation[0] = SplitInvestorModule.Allocation(btc, 5_000);
+        allocation[1] = SplitInvestorModule.Allocation(steth, 4_000);
+        
+        splitInvestorModule.setAllocation(allocation);
+        assertEq(splitInvestorModule.allocationEnumeratedLength(), 2);
+        assertEq(splitInvestorModule.allocationPercentages(btc), 5_000);
+        assertEq(splitInvestorModule.allocationPercentages(steth), 4_000);
     }
 }

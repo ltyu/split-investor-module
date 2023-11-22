@@ -10,13 +10,14 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
     using FunctionsRequest for FunctionsRequest.Request;
     using ModuleExecLib for IExecutorManager;
     uint32 public constant MAX_CALLBACK_GAS = 70_000;
+    uint16 public constant MAX_ALLOCATION_PERCENTAGE = 10_000;
 
     // A list of token addresses that this wallet wants to invest in
-    address[] allocationEnumerated;
+    address[] public allocationEnumerated;
 
     // Allocation percentages for each token address 
     // @dev represented with 2 decimal places (10000 = 100%)
-    mapping(address token => uint16 percentage) allocationPercentages;
+    mapping(address token => uint16 percentage) public allocationPercentages;
 
     // Chainlink subscription Id for consumer
     uint64 subscriptionId;
@@ -34,15 +35,35 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
     uint32 public lastErrorLength;
 
     error UnexpectedRequestID(bytes32 requestId);
+    error AllocationPercentageTooHigh();
+
+    struct Allocation {
+        address token;
+        uint16 percentage;
+    }
 
     constructor(address router) FunctionsClient(router) {}
 
+    function allocationEnumeratedLength() public view returns (uint256) {
+        return allocationEnumerated.length;
+    }
     /**
      * @notice Sets the allocation %
-     * @param _tokensToAllocate a list of tokens to
+     * @param allocation a list of tokens to
      */
-    function setAllocation(address[] calldata _tokensToAllocate) external {
+    function setAllocation(Allocation[] calldata allocation) external {
+        uint256 totalPercentage = 0;
+        address[] memory _allocationEnumerated = new address[](allocation.length);
+        for (uint256 i = 0; i < allocation.length; i++) {
+            _allocationEnumerated[i] = allocation[i].token;
+            allocationPercentages[allocation[i].token] = allocation[i].percentage;
+            totalPercentage += allocation[i].percentage;
+        }
 
+        allocationEnumerated = _allocationEnumerated;
+
+        if (totalPercentage > MAX_ALLOCATION_PERCENTAGE)
+            revert AllocationPercentageTooHigh();
     }
 
 
