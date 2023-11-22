@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.21;
 
-import { FunctionsClient } from "@chainlink/contracts/src/v0.8/functions/v1_0_0/FunctionsClient.sol";
-import { FunctionsRequest } from "@chainlink/contracts/src/v0.8/functions/v1_0_0/libraries/FunctionsRequest.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { FunctionsClient } from "chainlink/src/v0.8/functions/v1_0_0/FunctionsClient.sol";
+import { FunctionsRequest } from "chainlink/src/v0.8/functions/v1_0_0/libraries/FunctionsRequest.sol";
 import { ExecutorBase } from "modulekit/modulekit/ExecutorBase.sol";
 import { IExecutorManager, ExecutorAction, ModuleExecLib } from "modulekit/modulekit/IExecutor.sol";
-
+import { Swapper } from "@src/test/Swapper.sol";
+import "forge-std/console.sol";
 contract SplitInvestorModule is ExecutorBase, FunctionsClient {
     using FunctionsRequest for FunctionsRequest.Request;
     using ModuleExecLib for IExecutorManager;
@@ -14,15 +16,18 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
     uint16 public constant MAX_ALLOCATION_PERCENTAGE = 10_000;
 
     // Deposit Token that will be used to fund account
-    // IERC20 fundingToken;
+    IERC20 fundingToken;
 
     // A list of token addresses that this wallet wants to invest in
     // @dev For now we only handle up to 4 tokens for POC purposes
-    address[] public allocatedTokensList;
+    address[] public allocationList;
 
     // Allocation percentages for each token address 
     // @dev represented with 2 decimal places (10000 = 100%)
-    mapping(address token => uint16 percentage) public allocationPercentages;
+    mapping(address token => Allocation allocation) public allocations;
+
+    // Swapper (mocked for now, but can be Uniswap)
+    Swapper swapper;
 
     // Chainlink subscription Id for consumer
     uint64 subscriptionId;
@@ -41,32 +46,46 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
 
     error UnexpectedRequestID(bytes32 requestId);
     error AllocationPercentageTooHigh();
-
+    error LengthMismatch();
+    error OnlySwapper();
     struct Allocation {
-        address token;
         uint16 percentage;
         uint256 notionalValue; // total USD value
     }
 
-    constructor(address router) FunctionsClient(router) {}
+    constructor(address router, address _fundingToken, address _swapper) FunctionsClient(router) {
+        fundingToken = IERC20(_fundingToken);
+        swapper = Swapper(_swapper);
+    }
+
+    function allocationPercentage(address token) public view returns (uint16) {
+        return allocations[token].percentage;
+    }
+
+    function allocationNotionalValue(address token) public view returns (uint256) {
+        return allocations[token].notionalValue;
+    }
 
     function allocationEnumeratedLength() public view returns (uint256) {
-        return allocatedTokensList.length;
+        return allocationList.length;
     }
+
     /**
      * @notice Sets the allocation %
-     * @param allocation a list of tokens to
+     * @param _allocationList list of addresses to allocate
+     * @param _allocations a list of allocations to set a percentage for
      */
-    function setAllocation(Allocation[] calldata allocation) external {
+    function setAllocation(address[] calldata  _allocationList, Allocation[] calldata _allocations) external {
+        if (_allocationList.length != _allocations.length)
+            revert LengthMismatch();
+
         uint256 totalPercentage = 0;
-        address[] memory _allocationEnumerated = new address[](allocation.length);
-        for (uint256 i = 0; i < allocation.length; i++) {
-            _allocationEnumerated[i] = allocation[i].token;
-            allocationPercentages[allocation[i].token] = allocation[i].percentage;
-            totalPercentage += allocation[i].percentage;
+        for (uint256 i = 0; i < _allocationList.length; i++) {
+            allocations[_allocationList[i]].percentage = _allocations[i].percentage;
+            totalPercentage += _allocations[i].percentage;
         }
 
-        allocatedTokensList = _allocationEnumerated;
+        allocationList = _allocationList;
 
         if (totalPercentage > MAX_ALLOCATION_PERCENTAGE)
             revert AllocationPercentageTooHigh();
@@ -78,23 +97,61 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
      * @param account address of the account
      * @param data bytes data to be used for execution
      */
-    function depositAndInvest(address account, bytes memory data) external {
+    function depositAndInvest(address account, uint256 amount, bytes memory data) external {
         // Get the manager from data
         (IExecutorManager manager) = abi.decode(data, (IExecutorManager));
 
-        // Create the actions to be executed
-        ExecutorAction[] memory actions = new ExecutorAction[](2);
-
-
-        // Deposit USDC
-
-        // Buy x% of ETH 
-
-        // Buy y% of BTC
-        actions[0] = ExecutorAction({ to: payable(msg.sender), value: 1 wei, data: "" });
-
+        uint256 totalAllocations = allocationList.length;
+        
+        // @TODO do we need account here, or can we reference the SCA?
+        ExecutorAction[] memory actions = _createDepositAndSwapActions(account, amount, totalAllocations);
+        
         // Execute the actions
         manager.exec(account, actions);
+    }
+
+    // @dev this function also sets the notionalValue for each token allocated
+    function _createDepositAndSwapActions(address account, uint amount, uint256 totalAllocations) internal returns (ExecutorAction[] memory actions){
+        // Create the actions to be executed
+        // 1 action for fundingToken.transferFrom, and 2 for each loop creating 2 actions
+        actions = new ExecutorAction[]((totalAllocations * 2) + 1); 
+
+        // Deposit USDC
+        actions[0] = ExecutorAction({ 
+            to: payable(address(fundingToken)), 
+            value: 0,
+            data: abi.encodeWithSignature("transferFrom(address,address,uint256)", msg.sender, account, amount)
+        });
+
+        for (uint256 i; i < totalAllocations; i++) {
+            address tokenToAllocate = allocationList[i];
+            uint256 allocatedAmount = _calculateAllocationAmount(tokenToAllocate, amount);
+
+            // Sets the notional value.
+            allocations[tokenToAllocate].notionalValue = allocatedAmount;
+
+            // Approve swapper
+            actions[i * 2 + 1] = ExecutorAction({ 
+                to: payable(address(fundingToken)), 
+                value: 0,
+                data: abi.encodeWithSignature("approve(address,uint256)", address(swapper), amount)
+            });
+
+            // Swap
+            actions[i * 2 + 2] = ExecutorAction({ 
+                to: payable(address(swapper)), 
+                value: 0,
+                data: abi.encodeWithSignature("swap(address,uint256,address)", fundingToken, allocatedAmount, tokenToAllocate)
+            });
+        }
+    }
+
+    function setAllocationNotional(address tokenToAllocate, uint256 allocationAmount) public {
+        allocations[tokenToAllocate].notionalValue = allocationAmount;
+    }
+
+    function _calculateAllocationAmount(address token, uint256 fundingAmount) view internal returns(uint256) {
+        return fundingAmount = fundingAmount * allocations[token].percentage / MAX_ALLOCATION_PERCENTAGE;
     }
 
     /// @notice Send a rebalance request through Chainlink Functions
@@ -166,7 +223,7 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
         // For each token, store (newCalculatedNotional - lastCalculatedNotional), if result is positive
     }
     /**
-     * @notice Rebalances the tokens based on allocationPercentages. Intends to be called by Chainlink 
+     * @notice Rebalances the tokens based on allocations. Intends to be called by Chainlink 
      */
     function _rebalance() internal {
 
