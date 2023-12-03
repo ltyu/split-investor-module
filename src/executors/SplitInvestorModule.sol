@@ -2,18 +2,21 @@
 pragma solidity ^0.8.21;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { FunctionsClient } from "chainlink/src/v0.8/functions/v1_0_0/FunctionsClient.sol";
 import { FunctionsRequest } from "chainlink/src/v0.8/functions/v1_0_0/libraries/FunctionsRequest.sol";
 import { ExecutorBase } from "modulekit/modulekit/ExecutorBase.sol";
 import { IExecutorManager, ExecutorAction, ModuleExecLib } from "modulekit/modulekit/IExecutor.sol";
 import { Swapper } from "@src/test/Swapper.sol";
 import "forge-std/console.sol";
+
 contract SplitInvestorModule is ExecutorBase, FunctionsClient {
     using FunctionsRequest for FunctionsRequest.Request;
     using ModuleExecLib for IExecutorManager;
 
-    uint32 public constant MAX_CALLBACK_GAS = 500_000;
+    uint32 public constant MAX_CALLBACK_GAS = 1_000_000;
     uint16 public constant MAX_ALLOCATION_PERCENTAGE = 10_000;
+    uint256 public constant ORACLE_PRICE_PRECISION = 1 ether;
 
     // Deposit Token that will be used to fund account
     IERC20 fundingToken;
@@ -39,10 +42,16 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
     bytes32 public lastRequestId;
 
     // Chainlink last responses from fulfillRequest()
-    bytes32 public lastResponse;
-    bytes32 public lastError;
+    bytes public lastResponse;
+    bytes public lastError;
     uint32 public lastResponseLength;
     uint32 public lastErrorLength;
+
+    // Hackathon use only
+    // price of asset
+    mapping(address asset => uint256 price) tokenPrices;
+
+    // TODO use internal balance
 
     error UnexpectedRequestID(bytes32 requestId);
     error AllocationPercentageTooHigh();
@@ -68,6 +77,10 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
 
     function allocationEnumeratedLength() public view returns (uint256) {
         return allocationList.length;
+    }
+
+    function setAllocationNotional(address tokenToAllocate, uint256 allocationAmount) public {
+        allocations[tokenToAllocate].notionalValue = allocationAmount;
     }
 
     /**
@@ -146,10 +159,6 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
         }
     }
 
-    function setAllocationNotional(address tokenToAllocate, uint256 allocationAmount) public {
-        allocations[tokenToAllocate].notionalValue = allocationAmount;
-    }
-
     function _calculateAllocationAmount(address token, uint256 fundingAmount) view internal returns(uint256) {
         return fundingAmount = fundingAmount * allocations[token].percentage / MAX_ALLOCATION_PERCENTAGE;
     }
@@ -159,7 +168,7 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
     /// @param encryptedSecretsReferences Encrypted secrets payload
     /// @param args List of arguments accessible from within the source code
     /// @param _subscriptionId Billing ID
-    function calculateRebalances(
+    function sendRebalanceRequest(
         string calldata source,
         bytes calldata encryptedSecretsReferences,
         string[] calldata args,
@@ -182,63 +191,96 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
         if (lastRequestId != requestId) {
             revert UnexpectedRequestID(requestId);
         }
-        // Save only the first 32 bytes of response/error to always fit within MAX_CALLBACK_GAS
-        // @dev Technically Chainlink Functions can return up to 256 BYTES. For now, we'll keep it at 32.
-        lastResponse = bytesToBytes32(response);
+        // Save only the first 64 bytes of response/error to always fit within MAX_CALLBACK_GAS
+        // @dev Technically Chainlink Functions can return up to 256 BYTES. For now, we'll keep it at 64.
+        lastResponse = response;
         lastResponseLength = uint32(response.length);
-        lastError = bytesToBytes32(err);
+        lastError = err;
         lastErrorLength = uint32(err.length);
 
-        _rebalance();
+        
+        parseAmountsAndReblance(buyAmounts, sellAmounts);
     }
 
     /**
      * @notice Calculates the rebalance amounts
-     * returns a byte32, 1 byte for buy/sell and 7 bytes for amount. 7 bytes allows up to 2^56 
+     * returns byte64, 32 bytes for buy amounts and 32 bytes for sell amounts
      * 
-     * for example 0x0100000000038ea8000000000040992f000f0a5d01ed64ff0100000000000000
-     *      1 38EA8 means sell 233128 of token at index 0
-     *      0 4233519 means buy 4233519 of token at index 1
-     *      0 F0A5D01ED64FF means sell 4233519231231231 of token at index 2
-     *      1 0000000 means buy 0000000 of token at index 3
      * 
+     * for example: 
+     *      0x0032013200000000000000000000000000000000000000000000000000000000
+     *        0264000000000000000000000000000000000000000000000000000000000000
+     *      0032 means sell 50% of token at index 0
+     *      0132 means sell 50% of token at index 1
+     *      0264 means buy 100% of token at index 2
+     * 1 byte for buy/sell and 1 byte for the percentage to sell
      * @dev the intention is to allow this to be called by Chainlink Functions
      */
-    function calculateRebalance() public returns (bytes32){
-        // Get the stored lastCalculatedNotional for each token
-        uint56 amount1 = 233128;
-        bytes8 results1 = bytes8(abi.encodePacked(bytes1(0x01), bytes7(abi.encodePacked(amount1))));
+    function calculateRebalance(address account) public view returns (bytes memory rebalancingAmounts){ 
+        bytes memory sellAmounts;
+        bytes memory buyAmounts;
 
-        uint56 amount2 = 4233519;
-        bytes8 results2 = bytes8(abi.encodePacked(bytes1(0x00), bytes7(abi.encodePacked(amount2))));
-
-        uint56 amount3 = 0;
-        bytes8 results3 = bytes8(abi.encodePacked(bytes1(0x01), bytes7(abi.encodePacked(amount3))));
-
-        uint56 amount4 = 4233519231231231;
-        bytes8 results4 = bytes8(abi.encodePacked(bytes1(0x00), bytes7(abi.encodePacked(amount4))));
-        return bytes32(abi.encodePacked(results1, results2, results4, results3 ));
         // Calculate the new notional of each allocatedTokensList
+        for (uint8 i; i < allocationList.length; i++) {
+            address tokenToAllocate = allocationList[i];
+            uint256 tokenPrice = getTokenPrice(tokenToAllocate);
+            uint256 oldNotionalValue = allocations[tokenToAllocate].notionalValue;
+            uint256 newNotionalValue = IERC20(tokenToAllocate).balanceOf(account) * tokenPrice / ORACLE_PRICE_PRECISION;
 
-        // For each token, store (newCalculatedNotional - lastCalculatedNotional), if result is positive
+            uint256 higherNotionalValue = Math.max(newNotionalValue, oldNotionalValue);
+            uint256 lowerNotionalValue = Math.min(newNotionalValue, oldNotionalValue);
+            
+            uint256 percentageToChange = (higherNotionalValue - lowerNotionalValue) * 1 ether / newNotionalValue; 
+
+            // @dev Round down to whole percentages
+            uint8 percentageToChange_u8 = uint8(percentageToChange / 1e16);
+
+            if (newNotionalValue > oldNotionalValue) {
+                sellAmounts = abi.encodePacked(sellAmounts, bytes2(abi.encodePacked(uint16(i) << 8 | uint16(percentageToChange_u8))));
+            } else {
+                buyAmounts = abi.encodePacked(buyAmounts, bytes2(abi.encodePacked(uint16(i) << 8 | uint16(percentageToChange_u8))));
+            }            
+        }
+
+        rebalancingAmounts = abi.encodePacked(bytes32(sellAmounts), bytes32(buyAmounts));
     }
+
+    // @dev mock oracle
+    function getTokenPrice(address token) public view returns (uint256) {
+        return tokenPrices[token];
+    }
+
+    // @dev mock oracle
+    function setTokenPrice(address token, uint256 price) public returns (uint256) {
+        return tokenPrices[token] = price;
+    }
+
     /**
      * @notice Rebalances the tokens based on allocations. Intends to be called by Chainlink 
      */
-    function _rebalance() internal {
+    function parseAmountsAndReblance() public {
+        bytes memory _lastResponse = lastResponse;
+        bytes memory buyAmounts = bytes32(_lastResponse);
+        bytes memory sellAmounts;
+        assembly {
+            sellAmounts := mload(add(_lastResponse, 0x40))
+        }
 
+        for (uint i; i < buyAmounts.length; i++) {
+            console.logBytes2(buyAmounts[i]);
+        }
     }
 
-    function bytesToBytes32(bytes memory b) private pure returns (bytes32 out) {
-        uint256 maxLen = 32;
-        if (b.length < 32) {
-        maxLen = b.length;
-        }
-        for (uint256 i = 0; i < maxLen; ++i) {
-        out |= bytes32(b[i]) >> (i * 8);
-        }
-        return out;
-    }
+    // function bytesToBytes32(bytes memory b) private pure returns (bytes32 out) {
+    //     uint256 maxLen = 32;
+    //     if (b.length < 32) {
+    //         maxLen = b.length;
+    //     }
+    //     for (uint256 i = 0; i < maxLen; ++i) {
+    //         out |= bytes32(b[i]) >> (i * 8);
+    //     }
+    //     return out;
+    // }
 
     /**
      * @notice A funtion that returns name of the executor

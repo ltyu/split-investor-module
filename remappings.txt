@@ -4,5 +4,5 @@ solmate/=lib/modulekit/lib/solmate/src/
 @aa/=lib/modulekit/lib/account-abstraction/contracts/
 ds-test/=lib/forge-std/lib/ds-test/src/
 forge-std/=lib/forge-std/src/
-modulekit/=lib/modulekit/src/
+@modulekit/=lib/modulekit/src/
 @src=src
