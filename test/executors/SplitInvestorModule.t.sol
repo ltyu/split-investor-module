@@ -45,6 +45,8 @@ contract SplitInvestorModuleTest is Test, RhinestoneModuleKit {
 
         // Add executor to account
         instance.addExecutor(address(splitInvestorModule));
+
+        splitInvestorModule.setExecutionManager(address(instance.aux.executorManager));
     }
 
     function testDepositAndInvestBalanceCorrect() public {
@@ -157,8 +159,8 @@ contract SplitInvestorModuleTest is Test, RhinestoneModuleKit {
         splitInvestorModule.setTokenPrice(address(steth), 2 ether);
         splitInvestorModule.setTokenPrice(address(matic), 0.5 ether);
 
-        bytes memory rebalancingAmounts = splitInvestorModule.calculateRebalance(instance.account);
-        assertEq(rebalancingAmounts, abi.encodePacked(bytes32(abi.encodePacked(bytes1(0), bytes1(0x32), bytes1(0x01), bytes1(0x32))), bytes32(abi.encodePacked(bytes1(0x02),bytes1(0x64)))));
+        bytes memory rebalancingAmounts = splitInvestorModule.calculateRebalanceAmounts(instance.account);
+        assertEq(rebalancingAmounts, abi.encodePacked(bytes32(abi.encodePacked(bytes1(0), bytes1(0x32), bytes1(0x01), bytes1(0x32))), bytes32(abi.encodePacked(bytes1(0x02),bytes1(0x64))), instance.account));
 
         // call fullfill request
         vm.startPrank(address(chainlinkRouter));
@@ -169,10 +171,10 @@ contract SplitInvestorModuleTest is Test, RhinestoneModuleKit {
         chainlinkRouter.respondRequest();
 
         assertEq(splitInvestorModule.lastRequestId(), bytes32(uint256(1337)));
-        assertEq(splitInvestorModule.lastResponse(), bytes(abi.encodePacked()));
+        // assertEq(splitInvestorModule.lastResponse(), bytes(abi.encodePacked()));
         // should have the same initial balances
-        // assertEq(btc.balanceOf(instance.account), 2.5 ether);
-        // assertEq(steth.balanceOf(instance.account), 1.25 ether);
-        // assertEq(matic.balanceOf(instance.account), 5 ether);
+        assertEq(btc.balanceOf(instance.account), 2.5 ether);
+        assertEq(steth.balanceOf(instance.account), 1.25 ether);
+        assertEq(matic.balanceOf(instance.account), 5 ether);
     }
 }

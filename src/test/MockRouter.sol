@@ -29,7 +29,7 @@ contract MockRouter {
 
     // Calls splitInvestorModule.handleOracleFulfillment and returns a response after sendRequest
     function respondRequest() external {
-        bytes memory rebalancingAmounts = splitInvestorModule.calculateRebalance(account);
+        bytes memory rebalancingAmounts = splitInvestorModule.calculateRebalanceAmounts(account);
         splitInvestorModule.handleOracleFulfillment(bytes32(uint256(1337)), rebalancingAmounts, bytes(""));
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.21;
 
+import { BytesLib } from "@solidity-bytes-utils/BytesLib.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { FunctionsClient } from "chainlink/src/v0.8/functions/v1_0_0/FunctionsClient.sol";
@@ -10,7 +11,9 @@ import { IExecutorManager, ExecutorAction, ModuleExecLib } from "modulekit/modul
 import { Swapper } from "@src/test/Swapper.sol";
 import "forge-std/console.sol";
 
+// @dev note that there is minimum access control. This allows faster prototyping for the hackathon
 contract SplitInvestorModule is ExecutorBase, FunctionsClient {
+    using BytesLib for bytes;
     using FunctionsRequest for FunctionsRequest.Request;
     using ModuleExecLib for IExecutorManager;
 
@@ -51,7 +54,7 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
     // price of asset
     mapping(address asset => uint256 price) tokenPrices;
 
-    // TODO use internal balance
+    IExecutorManager executionManager;
 
     error UnexpectedRequestID(bytes32 requestId);
     error AllocationPercentageTooHigh();
@@ -105,6 +108,11 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
     }
 
 
+    // @dev Hackathon use only. Refactor this!
+    function setExecutionManager(address _executionManager) external {
+        executionManager = IExecutorManager(_executionManager);
+    }
+
     /**
      * @notice Deposits USDC and invest based on allocation %
      * @param account address of the account
@@ -116,7 +124,6 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
 
         uint256 totalAllocations = allocationList.length;
         
-        // @TODO do we need account here, or can we reference the SCA?
         ExecutorAction[] memory actions = _createDepositAndSwapActions(account, amount, totalAllocations);
         
         // Execute the actions
@@ -198,8 +205,7 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
         lastError = err;
         lastErrorLength = uint32(err.length);
 
-        
-        parseAmountsAndReblance(buyAmounts, sellAmounts);
+        parseAmountsAndReblance();
     }
 
     /**
@@ -216,7 +222,7 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
      * 1 byte for buy/sell and 1 byte for the percentage to sell
      * @dev the intention is to allow this to be called by Chainlink Functions
      */
-    function calculateRebalance(address account) public view returns (bytes memory rebalancingAmounts){ 
+    function calculateRebalanceAmounts(address account) public view returns (bytes memory rebalancingAmounts){ 
         bytes memory sellAmounts;
         bytes memory buyAmounts;
 
@@ -225,7 +231,7 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
             address tokenToAllocate = allocationList[i];
             uint256 tokenPrice = getTokenPrice(tokenToAllocate);
             uint256 oldNotionalValue = allocations[tokenToAllocate].notionalValue;
-            uint256 newNotionalValue = IERC20(tokenToAllocate).balanceOf(account) * tokenPrice / ORACLE_PRICE_PRECISION;
+            uint256 newNotionalValue = IERC20(tokenToAllocate).balanceOf(account) * tokenPrice / ORACLE_PRICE_PRECISION; // @audit probably unsafe to use balanceOf
 
             uint256 higherNotionalValue = Math.max(newNotionalValue, oldNotionalValue);
             uint256 lowerNotionalValue = Math.min(newNotionalValue, oldNotionalValue);
@@ -242,7 +248,7 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
             }            
         }
 
-        rebalancingAmounts = abi.encodePacked(bytes32(sellAmounts), bytes32(buyAmounts));
+        rebalancingAmounts = abi.encodePacked(bytes32(sellAmounts), bytes32(buyAmounts), account);
     }
 
     // @dev mock oracle
@@ -260,34 +266,74 @@ contract SplitInvestorModule is ExecutorBase, FunctionsClient {
      */
     function parseAmountsAndReblance() public {
         bytes memory _lastResponse = lastResponse;
-        bytes memory buyAmounts = bytes32(_lastResponse);
-        bytes memory sellAmounts;
-        assembly {
-            sellAmounts := mload(add(_lastResponse, 0x40))
+        bytes memory sellAmounts = _lastResponse.slice(0, 32);
+        bytes memory buyAmounts = _lastResponse.slice(32, 32);
+        address account = address(bytes20(_lastResponse.slice(64, 20)));
+
+        ExecutorAction[] memory actions = new ExecutorAction[](sellAmounts.length + buyAmounts.length);
+        uint256 actionsIndex; // used to point to the current array to insert action
+
+        // Sell for fundingToken
+        for (uint i; i < sellAmounts.length; i+=2) {
+            uint8 indexToSell = uint8(bytes1(sellAmounts.slice(i, 1)));
+            uint8 percentageToSell = uint8(bytes1(sellAmounts.slice(i + 1, 1)));
+            address tokenToSell = allocationList[indexToSell];
+            
+            if (percentageToSell > 0) {
+                // sell
+                uint256 amountToSell = IERC20(tokenToSell).balanceOf(account) * percentageToSell / 100;
+
+                actions[actionsIndex] = ExecutorAction({ 
+                    to: payable(address(tokenToSell)), 
+                    value: 0,
+                    data: abi.encodeWithSignature("approve(address,uint256)", address(swapper), amountToSell)
+                });
+
+                actions[actionsIndex + 1] = ExecutorAction({ 
+                    to: payable(address(swapper)), 
+                    value: 0,
+                    data: abi.encodeWithSignature("swap(address,uint256,address)", tokenToSell, amountToSell, address(fundingToken))
+                });
+                actionsIndex += 2;
+            }
         }
 
-        for (uint i; i < buyAmounts.length; i++) {
-            console.logBytes2(buyAmounts[i]);
+        // Buy using fundingToken
+        for (uint i; i < buyAmounts.length; i+=2) {
+            uint8 indexToBuy = uint8(bytes1(buyAmounts.slice(i, 1)));
+            uint8 percentageToBuy = uint8(bytes1(buyAmounts.slice(i + 1, 1)));
+            address tokenToBuy = allocationList[indexToBuy];
+            
+            if (percentageToBuy > 0) {
+                // sell
+                uint256 amountToBuy = IERC20(tokenToBuy).balanceOf(account) * percentageToBuy / 100;
+
+                actions[actionsIndex] = ExecutorAction({ 
+                    to: payable(address(tokenToBuy)), 
+                    value: 0,
+                    data: abi.encodeWithSignature("approve(address,uint256)", address(swapper), amountToBuy)
+                });
+
+                actions[actionsIndex + 1] = ExecutorAction({ 
+                    to: payable(address(swapper)), 
+                    value: 0,
+                    data: abi.encodeWithSignature("swap(address,uint256,address)", address(fundingToken), amountToBuy, tokenToBuy )
+                });
+                actionsIndex += 2;
+            }
         }
+
+
+        // Execute the actions
+        executionManager.exec(account, actions);
     }
-
-    // function bytesToBytes32(bytes memory b) private pure returns (bytes32 out) {
-    //     uint256 maxLen = 32;
-    //     if (b.length < 32) {
-    //         maxLen = b.length;
-    //     }
-    //     for (uint256 i = 0; i < maxLen; ++i) {
-    //         out |= bytes32(b[i]) >> (i * 8);
-    //     }
-    //     return out;
-    // }
 
     /**
      * @notice A funtion that returns name of the executor
      * @return name string name of the executor
      */
     function name() external view override returns (string memory name) {
-        name = "ExecutorTemplate";
+        name = "SplitInvestorModule";
     }
 
     /**
