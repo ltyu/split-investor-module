@@ -5,14 +5,14 @@ import "forge-std/Script.sol";
 import { RegistryDeployer } from "modulekit/modulekit/deployment/RegistryDeployer.sol";
 
 // Import modules here
-import { ValidatorTemplate } from "../src/validators/ValidatorTemplate.sol";
+import { SplitInvestorModule } from "../src/executors/SplitInvestorModule.sol";
 
 /// @title DeployModuleScript
 contract DeployModuleScript is Script, RegistryDeployer {
     function run() public {
         // Setup module bytecode, deploy params, and data
-        bytes memory bytecode = type(ValidatorTemplate).creationCode;
-        bytes memory deployParams = "";
+        bytes memory bytecode = type(SplitInvestorModule).creationCode;
+        bytes memory deployParams = hex'0000000000000000000000006e2dc0f9db014ae19888f539e59285d2ea04244c0000000000000000000000001ec30eade8ee90107acd50b49aebe112132416fc000000000000000000000000354c496bc44d89a24e1d30d232f05a8e34d4fbc5';
         bytes memory data = "";
 
         // Get private key for deployment

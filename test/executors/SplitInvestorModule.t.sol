@@ -37,7 +37,7 @@ contract SplitInvestorModuleTest is Test, RhinestoneModuleKit {
         steth = new MockToken();
         matic = new MockToken();
         fundingToken.mint(owner, 100 ether);
-        swapper = new Swapper(address(fundingToken), address(btc), address(steth));
+        swapper = new Swapper();
         chainlinkRouter = new MockRouter();
         // Setup executor
         splitInvestorModule = new SplitInvestorModule(address(chainlinkRouter), address(fundingToken), address(swapper));
