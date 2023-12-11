@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.21;
-import "@src/executors/SplitInvestorModule.sol";
+import "@src/executors/AssetBalancerModule.sol";
 import "forge-std/console.sol";
 
 contract MockRouter {
-    SplitInvestorModule splitInvestorModule;
+    AssetBalancerModule assetBalancerModule;
 
     // SCA address set by sendRequest
     address account;
 
-    function setSplitModule(address _splitInvestorModule) external {
-        splitInvestorModule = SplitInvestorModule(_splitInvestorModule);
+    function setSplitModule(address _assetBalancerModule) external {
+        assetBalancerModule = AssetBalancerModule(_assetBalancerModule);
     }
 
     function setAccount(address _account) public {
@@ -27,9 +27,9 @@ contract MockRouter {
         return requestId;
     }
 
-    // Calls splitInvestorModule.handleOracleFulfillment and returns a response after sendRequest
+    // Calls AssetBalancerModule.handleOracleFulfillment and returns a response after sendRequest
     function respondRequest() external {
-        bytes memory rebalancingAmounts = splitInvestorModule.calculateRebalanceAmounts(account);
-        splitInvestorModule.handleOracleFulfillment(bytes32(uint256(1337)), rebalancingAmounts, bytes(""));
+        bytes memory rebalancingAmounts = assetBalancerModule.calculateRebalanceAmounts(account);
+        assetBalancerModule.handleOracleFulfillment(bytes32(uint256(1337)), rebalancingAmounts, bytes(""));
     }
 }

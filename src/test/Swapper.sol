@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.21;
 
-import "@src/executors/SplitInvestorModule.sol";
 import "@src/test/MockToken.sol";
 import "forge-std/console.sol";
 
